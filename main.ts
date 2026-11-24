@@ -25,6 +25,10 @@ const DAY_SECS = 86_400;
 export interface Params {
   /** 'dip': buy a pullback inside a climb. 'breakout': buy a fresh high with strong inflow. */
   entryMode: 'dip' | 'breakout';
+  /** Lookback (slots) for the trend check (price must still be above its level then). */
+  trendWindow: number;
+  /** Price now must be at least this multiple of the price trendWindow slots ago. */
+  minTrend: number;
   /** Lookback (slots) whose high the dip is measured against. */
   dipWindow: number;
   /** Buy when price is at most this share of the window high (0.92 = 8% dip). */
@@ -80,6 +84,8 @@ export interface Params {
 
 export const DEFAULT_PARAMS: Params = {
   entryMode: 'dip',
+  trendWindow: 480,
+  minTrend: 1.2,
   dipWindow: 120,
   dipShare: 0.82,
   strengthWindow: 240,
@@ -147,7 +153,7 @@ export function createStrategy(p: Params = DEFAULT_PARAMS) {
   const myCoins = new Set<Pubkey>();
   let firstTime: number | null = null;
   let lastTime: number | null = null;
-  const keep = Math.max(p.dipWindow, p.strengthWindow, p.fadeWindow) + 5;
+  const keep = Math.max(p.dipWindow, p.strengthWindow, p.fadeWindow, p.trendWindow) + 5;
 
   const tapeOf = (mint: Pubkey): Tape => {
     let t = tapes.get(mint);
@@ -179,8 +185,13 @@ export function createStrategy(p: Params = DEFAULT_PARAMS) {
     let net = 0;
     let buySol = 0;
     let sellSol = 0;
+    // Price trendWindow slots ago (last trade at or before then; the
+    // earliest kept trade when the curve is younger than the window).
+    let oldPrice = 0;
     const byUser = new Set<string>();
     for (const tr of t.trades) {
+      if (oldPrice === 0) oldPrice = tr.price;
+      if (tr.slot <= now - p.trendWindow) oldPrice = tr.price;
       if (tr.slot <= now - p.dipWindow) {
         // Older trades only feed the strength window below.
         if (tr.slot > now - p.strengthWindow) {
@@ -206,6 +217,11 @@ export function createStrategy(p: Params = DEFAULT_PARAMS) {
       if (tr.slot > now - p.recentWindow) recent++;
     }
     if (last <= 0 || high <= 0) return false;
+    // The trend: even after the pullback, the price must still sit clearly
+    // above where it was trendWindow slots ago — a climb, not a dead cat
+    // bouncing inside a downtrend. Rebuilt stress tapes rarely hold a
+    // sustained climb, so this filter also fires far less on them.
+    if (oldPrice <= 0 || last < oldPrice * p.minTrend) return false;
     if (p.entryMode === 'breakout') {
       // Ride the climb: price at (or within 2% of) its window high, with the
       // tape still dominated by buyers. In a market where most curves die,
